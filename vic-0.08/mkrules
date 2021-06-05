@@ -1,0 +1,166 @@
+#
+#	mkrules
+#
+#	This is a default set of rules for Makefiles for some
+#	of my applications.  These rules should not be dependant
+#	upon any specific application at all.
+#
+#	The original of this file is at:
+#		http://mordred.ao.com/mkprogram/mkrules
+#	Version = mkrules v0.11 regan@ao.com
+#
+
+#	Make a default goal
+all::
+
+###
+###	Definitions
+###
+###	These constants are used within this set of rules, as well
+###	as by the main Makefile.
+###
+###	The user is expected to define or append to some of the
+###	variables listed below.
+###
+###	These rules expect that the following rules are defined in the
+###	main Makefile:
+###		all		-- Main build
+###	
+
+#	$(TAREXCLUDE) is defined only by the user to set up additional
+#	files to exclude from the archive.
+
+#	$(HOMEURL) is defined in the main Makefile to indicate where this
+#	program is distributed from.
+HOMEURL = http://mordred.ao.com/mkprogram
+
+#	$(MAJPROG) is defined in the main Makefile.  Here is a
+#	silly hack to attempt to get by.  The user must have something like:
+#		MAJPROG = bin/wordsearch.cgi
+MAJPROG = $(shell find . -type f)
+
+#	$(SRCDIRS) is the list of directories to be iterated over
+#	for the various major "make" functions.  The user can add
+#	items to this with:
+#		SRCDIRS += newdir newdir2
+SRCDIRS	= 
+
+#	$(PKGNAME) is the package name.  This is derived from the current
+#	directory, and is usually right.  If not, the user can override
+#	this.
+PKGNAME = $(shell pwd | sed "s:.*/::" | sed "s/-.*//")
+
+#	$(VERSION) is the version ID out of the major program.  The
+#	major program must be specified by the user like:
+#		MAJPROG = bin/wordsearch.cgi
+#	The Version string must exist in this file in a very stylized
+#	fashion.
+VERSION = $(shell grep "Version *= " $(MAJPROG) | head -1 | sed "s/.*v\([0-9.]*\).*/\1/")
+
+#	$(BINDIR) is the directory that locally installed binaries live in.
+#	The user can override this if appropriate.
+BINDIR = /usr/local/bin
+
+#
+#	testvalues
+#
+#	Show the values used by a number of the definitions.
+#	This is used during development to show that we are
+#	working with the correct definition of the variables.
+#
+testvalues::
+	@echo "Source directories: $(SRCDIRS)"
+	@echo "Package name: $(PKGNAME)"
+	@echo "Version ID: $(VERSION)"
+	@echo "Major program: $(MAJPROG)"
+
+#
+#	version.wh is used for pages run through webc.
+#
+#version.wh:: $(MAJPROG)
+version.wh::
+	rm -f version.wh
+	echo "#define _VERSION-$(PKGNAME)_ $(VERSION)" >version.wh
+webc.src/version.wh::
+	rm -f webc.src/version.wh
+	echo "#define _VERSION-$(PKGNAME)_ $(VERSION)" >webc.src/version.wh
+
+#
+#	The tar file is created with the directory information in
+#	it, with a filename containing the version ID.  As helpers,
+#	there are symbolic links with constant names.
+#
+#	A number of files are excluded from the distribution.  The
+#	user can exclude other files by defining a variable:
+#		TAREXCLUDE = --exclude foo --exclude bar
+#
+tar:	dotar
+dotar::
+	rm -f $(PKGNAME).tar.gz
+	rm -f ../$(PKGNAME)-$(VERSION)
+	ln -sf $(PKGNAME) ../$(PKGNAME)-$(VERSION)
+	cd ..; tar --exclude RCS --exclude "*.tar.gz"		\
+		--exclude "*.swp"				\
+		--exclude Notes --exclude Data			\
+		$(TAREXCLUDE)					\
+		-cz -h -f $(PKGNAME).tar.gz $(PKGNAME)-$(VERSION)
+	rm -f ../$(PKGNAME)-$(VERSION)
+	mv -f ../$(PKGNAME).tar.gz $(PKGNAME)-$(VERSION).tar.gz
+	chmod a+r,a-w $(PKGNAME)-*.tar.gz
+	ln -sf $(PKGNAME)-$(VERSION).tar.gz $(PKGNAME).tar.gz
+
+#
+#	Make all of the static web pages.  This is done by going
+#	to each directory and doing a "make".
+#
+all::
+	here=`pwd`;				\
+	for dir in $(SRCDIRS); do		\
+	    cd $$dir; make; cd $$here;		\
+	done
+
+#
+#	Remove everything that can be rebuilt.
+#
+clean::
+	rm -f `find . -name "*.wc" -a -print | sed "s/\.wc/.html/"`
+	here=`pwd`;				\
+	for dir in $(SRCDIRS); do		\
+	    cd $$dir; make clean; cd $$here;	\
+	done
+
+#
+#	Install everything that needs installation.
+#
+install::
+	here=`pwd`;				\
+	for dir in $(SRCDIRS); do		\
+	    cd $$dir; make install; cd $$here;	\
+	done
+
+#
+#	The "update" rule gets a current copy of the program and
+#	installs it.  As this does an install, this needs to be
+#	done as root.  Watch out.
+#
+update::
+	cd ..; GET $(HOMEURL)/$(PKGNAME).tar.gz >$(PKGNAME).tar.gz
+	cd ..; tar xvfz $(PKGNAME).tar.gz
+	cd `tar tfz $(PKGNAME).tar.gz | head -1`; make install
+
+#
+#	The "unpack" rule is used to unpack a new tar file.  This
+#	can be done via cron for slave sites.
+#
+#	This depends upon no files other then the distribution files
+#	being named after the MAJPROG followed by a dash.
+#
+unpack::
+	cd ..; tar xvfz `ls -1d $(MAJPROG)/$(MAJPROG)-* | tail -1`
+	rm -rf ../$(MAJPROG).old
+	cd ..; mv -f $(MAJPROG) $(MAJPROG).old; mv -f $(MAJPROG)-* $(MAJPROG)
+	cd ../$(MAJPROG); make dist
+	mv -f $(MAJPROG)-*.tar.gz ../$(MAJPROG)/
+	@cd /; echo "You are probably in the wrong directory."
+	@cd /; echo "Type:"
+	@cd /; echo "    cd ../$(MAJPROG)"

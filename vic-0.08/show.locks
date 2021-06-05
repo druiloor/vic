@@ -1,0 +1,86 @@
+#!/usr/local/bin/perl -w
+#
+#       show.locks
+#
+#       Show the outstanding RCS locks from the current directory on down.
+#
+
+###
+###     Configuration
+###
+#$Rlog          = "/usr/local/bin/rlog";
+$Rlog           = "/usr/bin/rlog";
+
+###
+###     Main program
+###
+
+    ProcessDirectory(".");
+
+
+###
+###     Display
+###
+###     Display appropriate information for a file.
+###
+sub Display
+    {
+    my($file, $owner) = @_;
+    my($date);
+
+    # Get the date off of the RCS file
+    $date = scalar(localtime((stat($file))[10]));
+
+    $file =~ s#/RCS/#/#;
+    $file =~ s#,v##;
+    $file =~ s#^\./##;
+
+    chomp $owner;
+    $owner =~ s/\s*([^:]+):.*/$1/;
+
+    printf "%-40s %-10.10s %s\n", $file, $owner, $date;
+    }
+
+
+###
+###     ProcessDirectory
+###
+###     See who has locks in this directory
+###
+sub ProcessDirectory
+    {
+    my($dir) = @_;
+    my(@allfiles, $done, $file, $inlock, @RCS);
+
+    # Print any locks which are in this directory
+    @RCS = glob "$dir/RCS/*,v";
+    for $file (@RCS)
+        {
+        next unless -r $file;
+#       print "Handling file $file\n";
+        open(RLOG, "$Rlog $file |") || die "Cannot handle rlog";
+        $done = 0;
+        while (<RLOG>)
+            {
+            $done = 1 if /------------/;
+            next if $done;
+            if (/^locks:/)
+                {
+                $inlock = 1;
+                next;
+                }
+            $inlock = 0 if (/^\w/);
+            Display($file, $_) if ($inlock);
+            }
+        close RLOG;
+        }
+
+    # Look in subdirectories
+    @allfiles = glob "$dir/*";
+    for $file (@allfiles)
+        {
+        next if $file eq "$dir/RCS";
+        next unless -d $file;
+        ProcessDirectory($file);
+        }
+    }

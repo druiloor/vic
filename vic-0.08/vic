@@ -1,0 +1,250 @@
+#!/usr/bin/perl -w
+#
+#	vic
+#
+#	Edit files with RCS.
+#
+#	Based on ideas from a program of the same name by Stephen W. Fulling.
+#
+#	The source and documentation for this program can be found at:
+#		http://mordred.ao.com/vic/
+#
+#	Dave Regan
+#	regan@ao.com
+#	8 May 2000
+#
+
+###
+###	Configuration
+###
+
+use strict;
+
+use vars qw($Editor $RCSRoot $RCSCheckOut $RCSCheckIn $RCSLock
+		$RCSUnlock $RCSUnlock $RCSDiff $RLog $TmpFile $Version);
+
+$RCSRoot	= "/usr/bin";
+$RCSCheckOut	= "$RCSRoot/co -l";
+$RCSCheckIn	= "$RCSRoot/ci -u";
+$RCSLock	= "$RCSRoot/rcs -l -q";
+$RCSUnlock	= "$RCSRoot/rcs -u -q";
+$RCSDiff	= "$RCSRoot/rcsdiff";
+$RLog		= "$RCSRoot/rlog";
+$TmpFile	= "/usr/tmp/$$.vic";
+
+$Version        = 'vic v0.08 regan@ao.com';
+
+###
+###	Main program
+###
+
+    my($filename);
+
+    #	Discover things about our environment.
+    $| = 1;
+    $Editor = $ENV{"VISUAL"} || $ENV{"EDITOR"} || "vi";
+
+    if ($#ARGV < 0)
+    	{
+    	print STDERR "Usage: vic file1 ...\n";
+    	exit 1;
+    	}
+
+    for $filename (@ARGV)
+    	{
+    	EditFile($filename);
+    	}
+    exit 0;
+
+
+###
+###	EditFile
+###
+###	Do the work necessary to edit a file.
+###
+sub EditFile
+    {
+    my($fname) = @_;
+    my($ans, $basename, $dirname, $lname, $ret);
+    my($dev, $ino, $mode, $nlink, $uid, $gid);
+
+    chomp($dirname = `dirname $fname`);
+    chomp($basename = `basename $fname`);
+
+    # If the file is a symbolic link, then we really want to
+    # edit the real file to keep a set of appropriate files.
+    if (-l $fname)
+    	{
+	print "$fname is a symbolic link to ";
+	$fname = readlink($fname);
+	print "$fname.  Do you want to edit that file? ";
+	$ans = <STDIN>;
+	return if ($ans !~ /y/i);
+	}
+    
+    # Ensure that the file exists.
+    if (! -f $fname)
+    	{
+    	# The file doesn't exist.  See if we can create it.
+    	if (!open(FILE, ">$fname"))
+    	    {
+    	    print "Cannot create $fname: $!.  Sorry.\n";
+    	    return;
+    	    }
+	close FILE;
+	system("chmod a-w $fname");
+    	}
+
+    # If the file has hard links, we don't know which one is under
+    # RCS.  This will get weird fast.  Don't do that.
+    if ((stat($fname))[3] != 1)
+    	{
+	print "There are ", (stat($fname))[3], " links to this file.\n";
+	print "It is best to delete all names except one before continuing.\n";
+	return;
+	}
+
+    # Ensure that the directory is writable.
+    if (!open(FILE, ">$dirname/test.$$.vic"))
+    	{
+    	# We cannot write in the directory,
+    	# so it is pointless to edit the file.
+    	print "Filename is $dirname/test.$$.vic\n";
+    	print "Permission denied for writing to $dirname: $!\n";
+    	return;
+    	}
+    close FILE;
+    unlink("$dirname/test.$$.vic");
+
+    # Ensure that the RCS directory exists
+    if (! -d "$dirname/RCS")
+    	{
+    	if (!mkdir("$dirname/RCS", 0775))
+    	    {
+    	    print "Permission denied creating directory $dirname/RCS: $!\n";
+    	    return;
+    	    }
+    	}
+
+    # Ensure that you can write into the RCS directory
+    if (!open(FILE, ">$dirname/RCS/test.$$.vic"))
+    	{
+	print "Permission denied to writing to $dirname/RCS: $!\n";
+	return;
+	}
+    close FILE;
+    unlink("$dirname/RCS/test.$$.vic");
+
+    # Get ownership and file modes from the original file.
+    ($dev, $ino, $mode, $nlink, $uid, $gid) = stat($fname);
+
+    # If there is no RCS entry, make one.
+    if (! -f "$dirname/RCS/$basename,v")
+    	{
+    	print "\nNOTE: $fname has never been checked into RCS,";
+    	print " checking in via '$RCSCheckIn'\n\n";
+    	system("$RCSCheckIn $fname");
+    	}
+
+    # See if the file is being edited by someone else.
+    $lname = GetLockersName($fname);
+    if ($lname ne "")
+    	{
+	print "ERROR: '$fname' locked (checked out)( by: $lname\n";
+	print "       You can force an unlock via 'rcs -u $fname, however\n";
+	print "       you BETTER be sure they're not really editing it.\n";
+	return;
+	}
+
+    # Run rcsdiff to see if somebody has changed the file without
+    # checking it in.  If changes are found, allow the operator
+    # to check it in, quit, or ignore.
+    $ret = system("$RCSDiff $fname >$TmpFile 2>/dev/null");
+    if ($ret)
+    	{
+	print " \n";
+	print "ERROR: File has been changed since last check in.  This means\n";
+	print "       someone has edited the file '$fname' \n";
+	print "       without checking in their changes to RCS.\n";
+	print "\n";
+	print "       Here are the changes:\n";
+	system("more $TmpFile");
+	unlink($TmpFile);
+	print "\n";
+	print "  '<' = RCS has information that the file does not.\n";
+	print "  '>' = The file has information that RCS does not.\n";
+	print "\n";
+	print "Here are your options (in the order you should consider):\n";
+	print "     1. Check the changes into RCS (syncronize file with RCS)\n";
+	print "     2. Exit and go get a beer\n";
+	print "     3. Ignore the changes and continue - DANGEROUS OPTION!\n";
+
+	print "---> ";
+	$ans = <STDIN>;
+	if ($ans =~ /1/)
+	    {
+	    print "Checking in $fname to RCS\n";
+	    system("chmod a-w $fname");
+	    ($dev, $ino, $mode, $nlink, $uid, $gid) = stat($fname);
+	    system("$RCSLock $fname");
+	    system("$RCSCheckIn $fname");
+	    }
+	elsif ($ans =~ /3/)
+	    {
+	    print "Ignoring RCS changes for file $fname\n";
+	    }
+	else
+	    {
+	    print "No changes made\n";
+	    return;
+	    }
+	}
+
+    # Finally, do the work.  The rlogs are done because it's the only
+    # I could monitor whether the user answered 'y' or 'n' to the rcs
+    # 'co' and 'ci' questions.
+    system("$RCSCheckOut $fname");
+    $lname = GetLockersName($fname);
+    if ($lname eq "")
+    	{
+    	print "Could not lock $fname.\n";
+    	return;
+    	}
+
+    system("$Editor $fname");
+    system("$RCSCheckIn $fname");
+    $lname = GetLockersName($fname);
+    if ($lname ne "")
+    	{
+	system("$RCSUnlock $fname");
+	print "File '$fname' has been unlocked.\n";
+	}
+
+    # After edits, change file ownership and mode back to what it was.
+    chown($uid, $gid, $fname);
+    chmod($mode, $fname);
+
+    # If the file is empty, delete it.
+    # This is normally useful, but there does exist some race conditions
+    # if multiple people are editing the file, or if you really wanted
+    # an empty file.
+    unlink($fname) if (-z $fname);
+    }
+
+
+###
+###	GetLockersName
+###
+###	Get the name of the person who holds the lock.
+###
+sub GetLockersName
+    {
+    my($fname) = @_;
+    my($lname);
+
+    $lname = `$RLog $fname | grep "locked by:"`;
+    chomp $lname;
+    $lname =~ s/.*locked by: //;
+    $lname =~ s/;.*//;
+    return $lname;
+    }

@@ -1,0 +1,1182 @@
+#!/usr/local/bin/perl -w
+#
+#	webc
+#
+#	A web "compiler".
+#
+#	This is a simple translator which converts a source file
+#	into a *.html file suitable for being served by the web
+#	server.
+#
+#	This is a mix of perl, html, and C.  It is also an ad'hoc
+#	system.
+#
+#	Dave Regan
+#	regan@ao.com
+#	http://www.ao.com/~regan/Webc
+#	31 January 1997
+#
+#	This program and the associated documentation are in the
+#	public domain.
+#
+
+#
+#	[00] 30Mar98 jl Add code to allow for #split point so
+#	head.h & tail.h can be in same file.  John Lombardo <john@deltanet.com>
+#
+
+###
+###	Configuration
+###
+
+use strict;
+use strict 'refs';
+use strict 'subs';
+use Cwd;
+use diagnostics;
+
+use vars qw(@AllSymbols %Callable %CallFuncs $Debug $Directory $DoUnderscore
+		$ExpandCount $InCGI $MaxExpand @MonName $NoLocalcode
+		%Symbols $WebCInclude $WebCPath $WebCVersion);
+
+$WebCVersion = 'webc  v0.61  regan@ao.com';
+$WebCInclude	= ".:/usr/local/lib/webc/include";
+$WebCPath	= ".:/usr/local/lib/webc/lc:/usr/local/lib/webc/lc/cgi";
+
+@MonName = ( 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+	     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+
+$Debug = 0;	# Debugging flag
+
+
+###
+###	Main program
+###
+
+    my($file);
+
+    # Stash a guess for the site name.
+    # It is reasonable for the user to override this.
+    InitSymTable();
+
+    if (!$InCGI)
+    	{
+	# If we are in a CGI program we don't do this work.
+	# Otherwise we deal with each of the files on the command
+	# line.
+	for $file (@ARGV)
+	    {
+	    if ($file =~ /^-/)
+	    	{
+		if ($file =~ /debug/)
+		    {
+		    $Debug = 1;
+		    }
+		elsif ($file =~ /version/)
+		    {
+		    print "webc version $Symbols{'__VERSION__'}\n";
+		    }
+		else
+		    {
+		    print "Unknown switch $file\n" if ($file !~ /help/);
+		    print "Usage: webc [-debug] [-version] file.wc ...\n";
+		    exit 1;
+		    }
+	    	next;
+	    	}
+	    if ($file =~ /\.html$/)
+		{
+		print "Not processing $file.  It already is an HTML file.\n";
+		next;
+		}
+	    print "Process $file\n" if ($Debug);
+	    InitSymTable();
+	    Compile($file);
+	    }
+	exit 0;
+	}
+
+    return 1;
+
+
+######
+######	Compilation routines
+######
+######	Template files exist which describe the work to be done.
+######	Each of these gets turned into an html file with appropriate
+######	substitutions made.
+######
+######	Substitutions include the following macros:
+######		__CWD__		The current working directory, useful for
+######				building up filenames.
+######		__DATE__	The current date
+######		__EMAIL__	The email of the current user
+######		__FILE__	The current filename (only the main file)
+######		__HR__		The html code to put out for a <hr>
+######		__HTMLFILE__	The current output filename
+######		__LINE__	The current line of __SOURCE__
+######		__MODIFIED__	The last modified date
+######		__SITE__	The web site name
+######		__SOURCE__	The source file (even include files)
+######		__TIME__	The current time
+######		__USER__	The current username
+######		__VERSION__	The current webc version ID
+######	in addition to any the user defines.  Some of the standard
+######	definitions are "guesses", and the user is free to override
+######	any of these.
+######
+######	Preprocessor directives understood:
+######		#include fname	A filename to include
+######				Include files nest, but don't put it into a loop
+######		#include "name" split_name
+######				Only include code from the named file in the
+######				named section.
+######		#call fn	Call a specific function
+######		#localcode fname Read a file into the compiler itself.
+######		#define X val	Define a value
+######		#pragma name	A Webc hack
+######		#if val string	Print a string if the val is not 0
+######		#callable fn	Indicates that the named function
+######				can be called anyplace it sees "fn()".
+######		#split name	Indicates a marker to split the file
+######
+
+###
+###	CanonFname
+###
+###	Remove redundancies from a filename.
+###
+sub CanonFname
+    {
+    my($fname) = @_;
+
+    $fname =~ s#/+#/#g;
+    $fname =~ s#/\./#/#g while ($fname =~ m#/\./#);
+    $fname =~ s#^\./##g;
+    $fname =~ s#[^/]+/\.\./## while ($fname =~ m#/\.\./#);
+    return $fname;
+    }
+
+
+###
+###	Compile
+###
+###	Compile a single file.
+###
+sub Compile
+    {
+    my($fname) = @_;
+    my(@tm);
+
+    return if (!defined($fname) || $fname eq "");
+    $NoLocalcode = 0 if (!defined($NoLocalcode));
+#   print "Compiling $fname\n";
+
+    # Open the file for reading, and also a file for writing.
+    # The output filename is *.html.
+    $fname = CanonFname(trim($fname));
+    if (! -r $fname)
+    	{
+    	print "Cannot open $fname\n";	# STDERR goes to the wrong place in CGI
+    	return;
+    	}
+    ($Symbols{'__HTMLFILE__'} = $fname) =~ s/\.[a-zA-Z]*$/.html/;
+    $Symbols{'__CWD__'} = cwd();
+
+    # Define appropriate symbols
+    $Symbols{'__FILE__'} = $fname;
+    @tm = localtime();
+    $Symbols{'__DATE__'} =
+    		sprintf "%d %s %d", $tm[3], $MonName[$tm[4]], $tm[5] + 1900;
+    $Symbols{'__TIME__'} = sprintf "%02d:%02d:%02d", $tm[2], $tm[1], $tm[0];
+    @tm = localtime((stat($fname))[9]);
+    $Symbols{'__MODIFIED__'} =
+    		sprintf "%d %s %d", $tm[3], $MonName[$tm[4]], $tm[5] + 1900;
+
+    if ($InCGI)
+    	{
+    	$Symbols{'__HTMLFILE__'} = "<STDOUT>";
+    	*OUT = *STDOUT;
+    	}
+    else
+    	{
+	if (!open(OUT, ">$Symbols{'__HTMLFILE__'}"))
+	    {
+	    print "Cannot open html file $Symbols{'__HTMLFILE__'}\n";
+	    return;
+	    }
+	}
+
+    CompileRead(".", $fname, "");
+
+    close OUT if (!$InCGI);
+    }
+
+
+###
+###	CompileRead
+###
+###	Read in a file.
+###
+###	If you have to make changes here, consider using the CompileRead
+###	routine instead of this routine.
+###
+sub CompileRead
+    {
+    my($parentdir, $fname, $wantsplit) = @_;
+    local(*IN);
+    my($dir, $include, $lc, $line, $oldfname,
+    			$split, $string, $subtag, $sym, $val);
+
+    $split = "";
+
+    if (!defined($fname))
+    	{
+	$line = (caller())[2];
+	print STDERR
+		"$0: fname is undefined in CompileRead of webc from $line\n";
+	my($env, $var);
+	print STDERR "Environment:\n";
+	for $env (sort keys %ENV)
+	    {
+	    print STDERR "    $env: $ENV{$env}\n";
+	    }
+	print STDERR "Symbols:\n";
+	for $var (sort keys %Symbols)
+	    {
+	    print STDERR "    $env: $Symbols{$var}\n";
+	    }
+	print STDERR "End of webc dump\n";
+	}
+
+    # Make a directory which tracks what is being read.
+    # The directory may have redundant dir/../ in it, but that's ok.
+    $dir = trim($fname);
+    $dir = "$parentdir/$fname" if ($fname !~ m#^/#);
+    $dir =~ s#/[^/]*$##;
+#print STDERR "Opening $fname $wantsplit, dir is $dir\n";
+    $fname =~ s#.*/##;
+
+    if (!open(IN, "<$dir/$fname"))
+	{
+	print "Cannot open source file $dir/$fname\n";
+	return;
+	}
+#    print "Reading $dir/$fname\n";
+
+    $oldfname = $Symbols{'__SOURCE__'};
+    $Symbols{'__SOURCE__'} = "$dir/$fname";
+    @AllSymbols = ();
+    while (<IN>)
+	{
+#print STDERR "Process $_";
+	if (/^\s*#/)
+	    {
+#	    print STDERR "Process $_";
+#print STDERR ".";
+	    chomp;
+	    s/\r//g;
+	    $line = $_;
+
+	    # See if we should include a file
+	    if ($line =~ /^\s*#\s*include ["<]([^">]+)[">]\s*(.*)/)
+	    	{
+		($include, $subtag) = ($1, $2);
+		$include = Expand(trim($include));
+		$include = FindPath($dir, $include, "include");
+#	    	CompileRead($dir, $include, $subtag);
+	    	CompileRead(".", $include, trim($subtag))
+					if (defined($include));
+	    	}
+	    elsif ($line =~ /^\s*#\s*include ["<]*([^">]+).*/)
+	    	{
+		$include = Expand(trim($1));
+		$include = FindPath($dir, $include, "include");
+#	    	CompileRead($dir, $include, "");
+	    	CompileRead(".", $include, "") if (defined($include));
+	    	}
+
+	    # See if we should source a file
+	    if ($NoLocalcode != 1 &&
+	    		    $line =~ /^\s*#\s*localcode ["<]*([^">]+).*/)
+	   	{
+	   	$lc = Expand($1);
+	   	$lc = FindPath($dir, $lc, "lc");
+	   	require($lc) if (defined($lc));
+	   	}
+
+	    # See if there is split here
+	    $split = $1 if ($line =~ /^\s*#\s*split\s+(\S.*)/);
+
+	    # See if there is a procedure to call
+	    if ($line =~ /^\s*#\s*call/)
+	    	{
+	    	$line = Expand($line);
+	    	$Directory = $dir;
+
+		# If running as the real user, let them call any
+		# function in any way that they want.  If it is part
+		# of a CGI program on a restricted machine, then
+		# only call functions which are in the CallFuncs hash.
+		# eval("$1('$2')") if ($line =~ /^\s*#\s*call\s+["<]?([^"\s>]+).?\s*(.*)/);
+		if ($line =~ /^\s*#\s*call\s+["<]?([^"\s>]+).?\s*(.*)/)
+		    {
+		    my($func, $param) = ($1, $2);
+		    if ($NoLocalcode)
+			{
+			if (Val($CallFuncs{$func}) eq "")
+			    {
+			    print OUT "Function $func is not registered in CallFuncs\n";
+			    }
+			else
+			    {
+			    eval("$func('$param')");
+			    print STDERR $@ if ($@);
+			    }
+			}
+		    else
+		    	{
+			eval("$func('$param')");
+			print STDERR $@ if ($@);
+		    	}
+		    }
+		}
+
+	    # See if this is a variable definition
+	    if ($line =~ /^\s*#\s*define\s+(\S+)(.*)/)
+	    	{
+		$sym = $1;
+		($val = $2) =~ s/^\s*//;
+		$Symbols{$sym} = $val;
+		@AllSymbols = ();
+		}
+
+	    # See if this is a pragma (hack)
+	    Pragma($1) if ($line =~ /^\s*#\s*pragma\s+(\S.*)/);
+
+	    # See if this is a simple #if
+	    if ($line =~ /^\s*#\s*if\s+\!\s*(\S+)\s+(.*)/)
+	    	{
+	    	$val = Expand($1);
+	    	$string = Expand($2);
+	    	if ($val eq "" || $val eq "0")
+	    	    {
+	    	    print OUT "$string\n";
+	    	    }
+	    	}
+	    elsif ($line =~ /^\s*#\s*if\s+(\S+)\s+(.*)/)
+	    	{
+	    	$val = Expand($1);
+	    	$string = Expand($2);
+	    	if ($val ne "" && $val ne "0")
+	    	    {
+	    	    print OUT "$string\n";
+	    	    }
+	    	}
+
+	    # See if this defines a callable function
+	    $Callable{$1} = 1 if ($line =~ /^\s*#\s*callable\s+(.*)/);
+	    }
+	else
+	    {
+	    if ($split eq $wantsplit)
+	    	{
+		$_ = Expand($_);
+
+		print OUT "$_";
+		}
+	    }
+	}
+    close IN;
+    $Symbols{'__SOURCE__'} = $oldfname;
+    }
+
+
+###
+###	Expand
+###
+###	Expand the macros in a string.
+###
+###	This can cause loops in a number of ways.  We will take
+###	the lazy way out and keep a counter for the number of
+###	expansions and give up after awhile.
+###
+###	The order of expansion is not guarenteed.
+###
+###	This is a pig if there are very many symbols (> 100).
+###	I have made some attempts at speeding up the process,
+###	but it is still slow.
+###
+###	The $ExpandCount is used to limit the number of substitutions
+###	on a line.  It is very twitchy.  That part isn't a feature.
+###
+sub Expand
+    {
+    local($_) = @_;		# This must be "local", not "my"
+    my($arg, $back, $count1, $count2, $count3, $fn, $front, $repl, $sym);
+
+    return $_ if ($ExpandCount == 0 || !defined($_) || $_ eq "");
+    $Symbols{'__LINE__'} = $.;
+#    @AllSymbols = keys %Symbols if (scalar(@AllSymbols) == 0);
+    @AllSymbols = keys %Symbols;		# People change the $Symbols too much.
+    for ($count1 = 0; $count1 < 100; $count1++)
+    	{
+    	# Call any functions found
+    	$count2 = 0;
+	for $fn (keys %Callable)
+	    {
+	    next if (!defined($fn) || ($fn eq ""));
+	    while (/(.*)$fn\s*\((.*?)\)(.*)/)
+	    	{
+	    	$count2++;
+	    	($front, $arg, $back) = ($1, $2, $3);
+	    	$arg =~ s/(['])/\\$1/g;
+	    	$_ = $front . eval("$fn('$arg')") . "$back\n";
+		print STDERR $@ if ($@);
+	    	last if ($count2 >= $ExpandCount);
+	    	}
+	    }
+
+    	# Expand any macros found
+	$count3 = 0;
+	if (!$DoUnderscore || $_ =~ /_/)
+	    {
+	    for $sym (@AllSymbols)
+		{
+		if ($sym =~ /^\s*$/)
+		    {
+		    # Bozo catch
+		    delete $Symbols{$sym};
+		    next;
+		    }
+		last if ($count3 >= $ExpandCount);
+		$repl = $Symbols{$sym};
+		$repl = "" if (!defined($repl));
+		$count3 += s/\Q$sym/$repl/g;
+		last if ($DoUnderscore && $_ !~ /_/);
+		}
+	    }
+	last if ($count2 == 0 && $count3 == 0);
+	last if ($count2 + $count3 >= $ExpandCount);
+	}
+    return $_;
+    }
+
+
+###
+###	FindPath
+###
+###	See if the file can be found in the path anyplace.
+###
+sub FindPath
+    {
+    my($curdir, $fname, $path) = @_;
+    my($dir, @dirs);
+
+    # Remove ../ in these circumstances
+    if ($NoLocalcode == 2)
+    	{
+	if ($fname =~ m#^/#)
+	    {
+	    print STDERR "Absolute pathnames not allowed in CGI programs\n";
+	    return undef;
+	    }
+    	1 while ($fname =~ s#\.\./##);
+    	}
+
+    # Look through the path
+    return $fname if ($fname =~ m#^/#);
+    if ($path eq "lc")		{ $path = $ENV{'WEBCPATH'};		}
+    elsif ($path eq "include")	{ $path = $ENV{'WEBCINCLUDE'};		}
+    	
+    @dirs = split(/:/, $path);
+    for $dir (@dirs)
+    	{
+    	$dir = $curdir if ($dir eq ".");
+    	return "$dir/$fname" if (-f "$dir/$fname");
+    	}
+    print STDERR "$fname not found in $path\n";
+    return undef;
+    }
+
+
+###
+###	InitSymTable
+###
+###	Build a fresh symbol table.
+###
+sub InitSymTable
+    {
+    my($host);
+
+    $MaxExpand = 100;
+    $ExpandCount = $MaxExpand;
+    $DoUnderscore = 0;
+    $ENV{'LOGNAME'} = "unknown" if (!defined($ENV{'LOGNAME'}));
+    $ENV{'WEBCPATH'} = $WebCPath if (!defined($ENV{'WEBCPATH'}));
+    $ENV{'WEBCINCLUDE'} = $WebCInclude if (!defined($ENV{'WEBCINCLUDE'}));
+    undef %Symbols;
+    $host = `hostname`;
+    chomp($host);
+    $Symbols{'__SITE__'} = (gethostbyname($host))[0];
+    $Symbols{'__USER__'} = $ENV{'LOGNAME'};
+    $Symbols{'__EMAIL__'} = "$Symbols{'__USER__'}\@$Symbols{'__SITE__'}";
+    $Symbols{'__HR__'} = "<hr>";		# Can be overridden
+    $Symbols{'__VERSION__'} = (split(/\s+/, $WebCVersion))[1];
+    $CallFuncs{'Anchor'} = 1;
+    $CallFuncs{'AnchorTable'} = 1;
+    $CallFuncs{'DumpVars'} = 1;
+    $CallFuncs{'HotBar'} = 1;
+    $CallFuncs{'Modified'} = 1;
+    $CallFuncs{'Segment'} = 1;
+    @AllSymbols = ();
+    }
+
+
+###
+###	Pragma
+###
+###	A place to collect hacks.  The less said about these the better.
+###
+sub Pragma
+    {
+    my($args) = @_;
+    my($pragma, @args) = split(/\s+/, $args);
+
+    if ($pragma eq "nodefine")		{	$ExpandCount = 0;	}
+    elsif ($pragma eq "define")		{	$ExpandCount = $MaxExpand; }
+    elsif ($pragma eq "nounderscore")	{	$DoUnderscore = 0;	}
+    elsif ($pragma eq "underscore")	{	$DoUnderscore = 1;	}
+    elsif ($pragma eq "expand")
+    	{
+    	$args[0] = $MaxExpand if (!defined($args[0]) || $args[0] !~ /^\d+$/);
+    	$ExpandCount = $args[0];
+    	}
+    }
+
+
+###
+###	RootRelative
+###
+###	We have a filename which is supposed to be relative from
+###	the root of the document tree.  However, the filename will
+###	be used relative to the current file being compiled (e.g.
+###	the web browser).  So modify the name to be relative to
+###	the current filename.
+###
+sub RootRelative
+    {
+    my($reference, $fname) = @_;
+    my($count, $tmp);
+
+    return $fname if ($fname =~ m#^/#);
+
+    ($tmp = CanonFname($reference)) =~ s#[^/]##g;
+    for ($count = 0; $count < length($tmp); $count++)
+    	{
+    	$fname = "../$fname";
+    	}
+    return $fname;
+    }
+
+
+###
+###	trim
+###
+###	Remove leading and trailing spaces.
+###	This is used to clean up some of the filenames, which
+###	means that filenames with leading or trailing spaces
+###	really in them will not be processed correctly.  However,
+###	that is less surprising then the other way.
+###
+sub trim
+    {
+    my($str) = @_;
+
+    return "" if (!defined($str));
+    $str =~ s/^\s+//;
+    $str =~ s/\s+$//;
+    return $str;
+    }
+
+
+###
+###	Val
+###
+###	Return the string or an empty string.
+###
+sub Val
+    {
+    my($str) = @_;
+
+    return $str || "";
+    }
+
+
+######
+######	Routines for the user to call.
+######
+######	These are expected to be called with "#call", and write things
+######	to the open output file OUT.
+######
+######	These routines should never have been put into webc, but
+######	should have been put into external files called by #localcode.
+######
+
+###
+###	Test
+###
+###	See if this gets a parameter
+###
+sub Test
+    {
+    my($param) = @_;
+
+    print "Param is \"$param\"\n";
+    }
+
+
+###
+###	Modified
+###
+###	Print an appropriate modification notice.
+###
+sub Modified
+    {
+    print OUT "<br><i>Last modified $Symbols{'__MODIFIED__'}</i><br>\n";
+    }
+
+
+###
+###	HotBar
+###
+###	Produce a "hot button bar" in the current location.
+###
+###	Call with:
+###		#call HotBar PAGELIST.FILE HOTBAR.FILE
+###	To represent a missing entry, pass in /dev/null.
+###
+###	The PAGELIST.FILE is used to specify the order that pages
+###	are to be ordered in the document.
+###
+###	The HOTBAR.FILE indicates which buttons to put on the
+###	hotbar.
+###
+###	It might be nice to have images associated with buttons.
+###
+sub HotBar
+    {
+    my($args) = @_;
+    my($prev, $next);
+    my($basename, $fname, $hotbar, $item, $last, $name, @names);
+    my($pagelist, $value, @values);
+
+    # First find the previous and next information
+    $prev = "";
+    $next = "";
+    ($pagelist, $hotbar) = split(/\s+/, $args);
+    $pagelist = trim($pagelist);
+    $hotbar = trim($hotbar);
+    if ($pagelist eq "" || $hotbar eq "")
+    	{
+    	print "Usage: #call HotBar PAGELIST.FILE HOTBAR.FILE\n";
+    	return;
+    	}
+#print "Before $pagelist $hotbar\n";
+    $pagelist = "$Directory/$pagelist" if ($pagelist !~ m#^/#);
+    $hotbar   = "$Directory/$hotbar"   if ($hotbar   !~ m#^/#);
+    $pagelist = CanonFname($pagelist);
+    $hotbar   = CanonFname($hotbar);
+#print "After $pagelist $hotbar\n";
+
+    if (!open(PL, "<$pagelist"))
+	{
+	print "Cannot open pagelist $pagelist\n";
+	}
+    else
+	{
+	# Find previous item
+	$last = "";
+	while (<PL>)
+	    {
+	    chomp;
+	    s/^\s*(.*?)\s*$/$1/;
+	    $last = $_;
+	    next if (/^#/);
+	    last if (/^\s*\Q$Symbols{'__HTMLFILE__'}\E\s*$/);
+	    $prev = $_;
+	    }
+	$prev = "" if ($last !~ /^\Q$Symbols{'__HTMLFILE__'}\E$/);
+
+	# Find the next item
+	while (<PL>)
+	    {
+	    chomp;
+	    s/^\s*(.*?)\s*$/$1/;
+	    next if (/^#/);
+	    $next = $_;
+	    last;
+	    }
+	close PL;
+#print "Make $prev relative from $Symbols{'__HTMLFILE__'}  ";
+	$prev = RootRelative($Symbols{'__HTMLFILE__'}, $prev) if ($prev ne "");
+#print "giving $prev.\n";
+#print "Make $next relative from $Symbols{'__HTMLFILE__'}  ";
+	$next = RootRelative($Symbols{'__HTMLFILE__'}, $next) if ($next ne "");
+#print "giving $next\n";
+	}
+
+    # Find the pairs of URLs/description.
+    if (!open(HB, "<$hotbar"))
+	{
+	print "Cannot open hotbar file $hotbar\n";
+	}
+    else
+	{
+	while (<HB>)
+	    {
+	    chomp;
+	    s/^\s*(.*?)\s*$/$1/;
+	    next if (/^#/ || /^\s*$/);
+	    ($name, $value) = split(/\s+/, Expand($_), 2);
+	    next if (!defined(!$value));
+	    push(@names, $name);
+	    push(@values, $value);
+	    }
+	close HB;
+	}
+
+    # OK.  We've now got all the information we are going to get.
+    # It's time to emit the code.
+#    print OUT "<hr>\n";
+    print OUT Expand($Symbols{'__HR__'}) . "\n";
+    print OUT "[<a href=\"$prev\">Previous</a>]\n" if ($prev ne "");
+    for ($item = 0; $item <= $#names; $item++)
+    	{
+    	$basename = $names[$item];
+    	$basename =~ s/\.[^.]*$//;
+    	if (($Symbols{'__FILE__'} =~ m#/\Q$basename#) ||
+    	    ($Symbols{'__FILE__'} =~ m#^\Q$basename#))
+    	    {
+    	    print OUT "[$values[$item]]\n";
+    	    }
+	else
+	    {
+	    $basename = $names[$item];
+	    $basename .= ".html" if ($basename !~ /\./);
+	    print OUT "[<a href=\"$basename\">$values[$item]</a>]\n";
+	    }
+    	}
+    print OUT "[<a href=\"$next\">Next</a>]\n" if ($next ne "");
+#    print OUT "<hr>\n";
+    print OUT Expand($Symbols{'__HR__'}) . "\n";
+    }
+
+
+###
+###	DumpVars
+###
+###	Dump the current symbol table.
+###
+sub DumpVars
+    {
+    my($key);
+
+    print OUT "<p>\n";
+    for $key (sort(keys %Symbols))
+    	{
+    	print OUT "#define $key\t$Symbols{$key}<br>\n";
+    	}
+    }
+
+
+###
+###	AnchorTable
+###
+###	This little function creates a table in an html file using the
+###	webc compiling software.  Its lone argument in the file which
+###	contains the anchors for that particular file.  I suggest the
+###	format {filename}.anchor.h so things don't get confusing.
+###
+###	This code (AnchorTable, Anchor, and Segment) added by renee.
+###	This has been reformatted by regan.
+###
+sub AnchorTable
+    {
+    my($args) = @_;
+    my(@Anchor, @Anchorlist) = ();
+    my($i, $Length, $r, $TableChoice, $TheLine);
+
+    # The Program attempts to open the anchor list called, and woe to ye
+    # who improperly calls this file.
+    chomp($args);
+    if (!open(AT, "<$args"))
+    	{
+        print "File \"$args\" does not exist.\n";
+	return;
+        }
+    print "Processing $args\n";
+
+    # The program now defines a handy 2-D array %Anchorlist which contains
+    # the split quantities Table data and key(anchor name).
+    while (<AT>)
+    	{
+        $TheLine = $_;
+        chomp($TheLine);
+	$TheLine =~ s/^\s*//;
+	$TheLine =~ s/\s*$//;
+        next if ($TheLine =~ /^\#/ || $TheLine !~ /\s/);
+
+	@Anchor = split(/\s+/, $TheLine);
+	while (1)
+	    {
+	    last if ($Anchor[2] !~ /\S+/);
+	    $Anchor[1] = "$Anchor[1] $Anchor[2]";
+	    splice(@Anchor, 2, 1);
+	    }
+
+	($Anchor[0] = $TheLine) =~ s/\s.*//;
+	($Anchor[1] = $TheLine) =~ s/^[^\s]*\s+//;
+        push(@Anchorlist, [ "$Anchor[0]" , "$Anchor[1]" ])
+        }
+
+    # now we figure out what kind of table we wish to create, for anchor
+    # lists containing (gasp! the evil fiends!) 9 or more entries, we
+    # create a three wide table, for smaller tables a two column table
+    # will do.
+    $TableChoice = scalar(@Anchorlist);
+    $r = $TableChoice;
+    if ($TableChoice < 9)
+    	{
+	print OUT "<CENTER><TABLE>\n";
+	for ($i = 0; $i < $TableChoice; $i += 2)
+	    {
+	    print OUT "<TR valign=top>\n<TD>\n";
+	    print OUT "<A HREF=\"#$Anchorlist[$i][0]\">" .
+	    	      "$Anchorlist[$i][1]</A>\n</TD>";
+	    $r -= 1;
+	    unless ($r == 0)
+	    	{
+		print OUT "<TD>\n";
+		print OUT "<A HREF=\"#$Anchorlist[($i+1)][0]\">" .
+			  "$Anchorlist[($i+1)][1]</A>\n</TD></TR>";
+		$r -= 1;
+		}
+	    }
+	print OUT "</TABLE></CENTER>\n"
+	}
+
+    # Now we do the bigger table
+    if ($TableChoice >= 9)
+    	{
+	print OUT "<CENTER><TABLE>\n";
+	for ($i = 0; $i < $TableChoice; $i += 3)
+	    {
+	    print OUT "<TR valign=top>\n<TD>\n";
+	    print OUT "<A HREF=\"#$Anchorlist[$i][0]\">" .
+	    	      "$Anchorlist[$i][1]</A>\n";
+	    print OUT "</TD>\n";
+	    $r -= 1;
+	    unless ($r == 0)
+	    	{
+		print OUT "<TD><A HREF=\"#$Anchorlist[($i+1)][0]\">" .
+			  "$Anchorlist[($i+1)][1]</A>\n</TD>\n";
+		$r -= 1;
+		}
+	    unless ($r == 0)
+	    	{
+		print OUT "<TD><A HREF=\"#$Anchorlist[($i+2)][0]\">" .
+			  "$Anchorlist[($i+2)][1]</A>\n</TD>\n";
+		$r -= 1;
+		}
+	    }
+	print OUT "</TABLE></CENTER>\n"
+	}
+
+    # Now we have the Anchortables added properly to the appropriate files
+    # Ergo, end of subroutine
+    }
+
+
+###
+###	Anchor
+###
+###	This function is called by the method:
+###	    #call Anchor {name of anchor in the anchor file assoc w/ file}
+sub Anchor
+    {
+    my($arg) = @_;
+
+    chomp $arg;
+    print OUT "<A NAME=\"$arg\">";
+    # And that is all there is to it
+    }
+
+
+###
+###	Segment
+###
+###	This function creates a line with a logo image, title, and
+###	several navigational buttons.
+###	To call this function do #call Segment {filename}, where
+###	filename is the file containing the appropriate navigational
+###	buttons (their names and their targets).  The format for the
+###	file is target file name and then the name of the button
+###
+sub Segment
+    {
+    my($File) = @_;
+    my($i, $TheLine, @NavBut, @NavList, $Length);
+
+    chomp($File);
+    $File = trim($File);
+    if (!open(READ, "<$File"))
+    	{
+	print "Your navigation button file ($File) does not exist: $!\n";
+	return;
+	}
+
+    while (<READ>)
+    	{
+	$TheLine = $_;
+	chomp($TheLine);
+	next if ($TheLine =~ /^\#/);
+	@NavBut = split(/\s+/, $TheLine);
+	while(1)
+	    {
+	    last if ($NavBut[2] !~ /\S+/);
+	    $NavBut[1] = "$NavBut[1] $NavBut[2]";
+	    splice(@NavBut, 2, 1);
+	    }
+	push(@NavList, [ "$NavBut[0]" , "$NavBut[1]" ]);
+	}
+    close(READ);
+    $Length = @NavList;
+
+    # As the file being used comes in table form already, we must take
+    # ourselves out of table form as at least my version of netscape
+    # does not like tables in table
+    print OUT "<CENTER><TABLE>\n";
+    print OUT "<TR><TD COLSPAN=3 ROWSPAN=$Length>\n";
+    print OUT "<IMG SRC=\"_LOGO_\" ALIGN=\"middle\"></TD>\n";
+    print OUT "<TD COLSPAN=3 ROWSPAN=$Length>";
+    print OUT "<H1>_SUBTITLE_</H1></TD>\n";
+
+    for ($i = 0; $i < $Length; $i++)
+    	{
+	print OUT "<TR>" if ($i != 0);
+	print OUT "<TD>\n";
+	print OUT "<A HREF=\"$NavList[$i][0]\">$NavList[$i][1]</A>\n";
+	print OUT "</TD></TR>\n";
+	}
+
+    # We're now down with the meat of the table, so we finish it off and
+    # go back
+    print OUT "</TABLE></CENTER>\n";
+    }
+
+
+######
+######	New routines for compiling to a scalar.
+######
+######	These routines do not directly write to a file.  This
+######	has the advantage of working better in an embedded
+######	application.  Hoever, the "#call" routines fail, as
+######	they write to the file OUT.  This could possibly be fixed
+######	by creating a temporary file to hold the output, and then
+######	reading it back into the return scalar, but it isn't interesting
+######	right now.
+######
+######	Note that #call'ed routines that *know* they are called from
+######	this environment can return the string rather than printing
+######	it on OUT, and things can probably be made to run.  However,
+######	there are enough compatibility issues involved here that it
+######	is probably best to avoid the situation.
+######
+######	This routine can be used to replace the standard routines as
+######	the program develops.
+######
+
+
+###
+###	CompileToScalar
+###
+###	Compile a single file to a scalar value.
+###
+###	This is used in CGI processing or other places
+###	where webc is embedded in a larger program.  Because
+###	everything is being written to a scalar, nothing can
+###	be written to a file.  This means that the #call routines
+###	will not work, as they write to OUT.  However, the callable
+###	routines work fine as they return a string.
+###
+sub CompileToScalar
+    {
+    my($fname) = @_;
+    my($retval, @tm);
+
+    return if (!defined($fname) || $fname eq "");
+
+    # Open the file for reading, and also a file for writing.
+    $fname = CanonFname($fname);
+    return "Error: Cannot find $fname\n" if (! -r $fname);
+
+    # Define appropriate symbols
+    $Symbols{'__FILE__'} = $fname;
+
+    @tm = localtime();
+    $Symbols{'__DATE__'} =
+    		sprintf "%d %s %d", $tm[3], $MonName[$tm[4]], $tm[5] + 1900;
+    $Symbols{'__TIME__'} = sprintf "%02d:%02d:%02d", $tm[2], $tm[1], $tm[0];
+
+    @tm = localtime((stat($fname))[9]);
+    $Symbols{'__MODIFIED__'} =
+    		sprintf "%d %s %d", $tm[3], $MonName[$tm[4]], $tm[5] + 1900;
+
+    $Symbols{'__HTMLFILE__'} = "<scalar>";
+
+    $retval = CompileRead2(".", $fname, "");
+    return $retval;
+    }
+
+
+###
+###	CompileRead2
+###
+###	Read in a file.
+###
+sub CompileRead2
+    {
+    my($parentdir, $fname, $wantsplit) = @_;
+    local(*IN);
+    my($dir, $include, $lc, $line, $oldfname, $retval,
+    			$split, $string, $sym, $subtag, $val);
+
+    $split = "";
+
+    # Make a directory which tracks what is being read.
+    # The directory may have redundant dir/../ in it, but that's ok.
+    $dir = trim($fname);
+    $dir = "$parentdir/$fname" if ($fname !~ m#^/#);
+    $dir =~ s#/[^/]*$##;
+    $fname =~ s#.*/##;
+
+    return "Error: Cannot open source file $dir/$fname\n"
+    			if (!open(IN, "<$dir/$fname"));
+
+    $oldfname = $Symbols{'__SOURCE__'};
+    $Symbols{'__SOURCE__'} = "$dir/$fname";
+    @AllSymbols = ();
+    $retval = "";
+    while (<IN>)
+	{
+	if (/^\s*#/)
+	    {
+	    chomp;
+	    s/\r//g;
+	    $line = $_;
+
+	    # See if we should include a file
+	    if ($line =~ /^\s*#\s*include ["<]([^">]+)[">]\s*(.*)/)
+	    	{
+		($include, $subtag) = ($1, $2);
+		$include = Expand(trim($include));
+		$include = FindPath($dir, $include, "include");
+#	    	$retval .= CompileRead2($dir, $include, $subtag);
+	    	$retval .= CompileRead2(".", $include, trim($subtag))
+					if (defined($include));
+	    	}
+	    elsif ($line =~ /^\s*#\s*include ["<]*([^">]+).*/)
+	    	{
+		$include = Expand(trim($1));
+		$include = FindPath($dir, $include, "include");
+#	    	$retval .= CompileRead2($dir, $include, "");
+	    	$retval .= CompileRead2(".", $include, "")
+					if (defined($include));
+	    	}
+
+	    # See if we should source a file
+	    if ($NoLocalcode != 1 &&
+	    		    $line =~ /^\s*#\s*localcode ["<]*([^">]+).*/)
+	   	{
+	   	$lc = Expand($1);
+	   	$lc = FindPath($dir, $lc, "lc");
+	   	require($lc) if (defined($lc));
+	   	}
+
+	    # See if there is split here
+	    $split = $1 if ($line =~ /^\s*#\s*split\s+(\S.*)/);
+
+	    # See if there is a procedure to call
+	    if ($line =~ /^\s*#\s*call/)
+	    	{
+	    	$line = Expand($line);
+	    	$Directory = $dir;
+
+		# If running as the real user, let them call any
+		# function in any way that they want.  If it is part
+		# of a CGI program on a restricted machine, then
+		# only call functions which are in the CallFuncs hash.
+		# eval("$1('$2')") if ($line =~ /^\s*#\s*call\s+["<]?([^"\s>]+).?\s*(.*)/);
+		if ($line =~ /^\s*#\s*call\s+["<]?([^"\s>]+).?\s*(.*)/)
+		    {
+		    my($func, $param) = ($1, $2);
+		    if ($NoLocalcode)
+			{
+			if (Val($CallFuncs{$func}) eq "")
+			    {
+			    $retval .= "Function $func is not registered in CallFuncs\n";
+			    }
+			else
+			    {
+			    $retval .= eval("$func('$param')");
+			    print STDERR $@ if ($@);
+			    }
+			}
+		    else
+		    	{
+			$retval .= eval("$func('$param')");
+			print STDERR $@ if ($@);
+		    	}
+		    }
+		}
+
+	    # See if this is a variable definition
+	    if ($line =~ /^\s*#\s*define\s+(\S+)(.*)/)
+	    	{
+		$sym = $1;
+		($val = $2) =~ s/^\s*//;
+		$Symbols{$sym} = $val;
+		@AllSymbols = ();
+		}
+
+	    # See if this is a pragma (hack)
+	    Pragma($1) if ($line =~ /^\s*#\s*pragma\s+(\S.*)/);
+
+	    # See if this is a simple #if
+	    if ($line =~ /^\s*#\s*if\s+\!\s*(\S+)\s+(.*)/)
+	    	{
+	    	$val = Expand($1);
+	    	$string = Expand($2);
+	    	$retval .= "$string\n" if ($val eq "" || $val eq "0");
+	    	}
+	    elsif ($line =~ /^\s*#\s*if\s+(\S+)\s+(.*)/)
+	    	{
+	    	$val = Expand($1);
+	    	$string = Expand($2);
+	    	$retval .= "$string\n" if ($val ne "" && $val ne "0");
+	    	}
+
+	    # See if this defines a callable function
+	    $Callable{$1} = 1 if ($line =~ /^\s*#\s*callable\s+(.*)/);
+	    }
+	else
+	    {
+	    $retval .= Expand($_) if ($split eq $wantsplit);
+	    }
+	}
+    close IN;
+    $Symbols{'__SOURCE__'} = $oldfname;
+    return $retval;
+    }
+
